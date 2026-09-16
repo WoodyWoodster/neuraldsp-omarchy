@@ -90,12 +90,9 @@ input, and your headphone output. That setting persists in the prefix.
 ./uninstall.sh --purge  # also delete prefix, installers, catalog, logs
 ```
 
-## Notes for publishers
+## Disclaimer
 
-- No licensed binaries, prefix dumps, or personal `apps.json` in the repo.
-- Neural DSP does not officially support Linux; this is a community Wine
-  wrapper, not affiliated with Neural DSP, Focusrite, PACE, or Omarchy.
-- Support matrix: XWayland required (Wine runs with the X11 driver),
-  per-title PipeASIO selection on first run. iLok is a silent prerequisite;
-  `./install.sh` (and later `sync` if needed) opens License Manager for sign-in.
-  Passwords stay on ilok.com.
+Community Wine wrapper for Omarchy, not a Neural DSP, Focusrite, PACE, or
+official Omarchy product. Neural DSP doesn't support Linux. The repo never
+ships licensed installers, prefix dumps, or a personal `apps.json`. Wine
+needs XWayland; iLok sign-in stays in License Manager.
