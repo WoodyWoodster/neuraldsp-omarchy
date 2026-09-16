@@ -24,16 +24,19 @@ skipped. No `alsa-scarlett-gui`, no Focusrite Control, no OS mixer.
 - Omarchy (Arch) with PipeWire running (default)
 - A Neural DSP account with licensed plugins (installers are yours; the repo
   never bundles or downloads them)
-- An iLok account (the free iLok License Manager is auto-downloaded)
+- An iLok account. `./install.sh` silently installs the free License Manager
+  (download URL is public; no credentials are ever handled) and opens it once
+  so you can sign in yourself on ilok.com.
 
 ## Quickstart
 
 ```bash
-./install.sh        # packages, deploy, Hyprland hook, health check
-neuraldsp add       # opens neuraldsp.com/downloads + staging folder: log in, download
-neuraldsp add ~/Downloads/Archetype*.exe   # stage installer(s)
-neuraldsp sync      # iLok prerequisite, run installers, refresh launchers + menu
+./install.sh        # as your user (not sudo): packages, prefix, PipeASIO, silent iLok, Hyprland hook
+neuraldsp add       # opens neuraldsp.com/downloads, watches ~/Downloads, stages finished installers
+neuraldsp sync      # run staged titles, refresh launchers + menu
 ```
+
+First `./install.sh` is the slow one (Wine prefix + vcrun + DXVK). Re-runs skip installed packages and reuse `~/.cache/winetricks` plus a cached iLok zip under `~/.cache/neuraldsp/` (survives `--purge`).
 
 Then open titles from the Guitar menu or Super+Space.
 
@@ -41,8 +44,8 @@ Then open titles from the Guitar menu or Super+Space.
 
 | Command            | What it does |
 |--------------------|--------------|
-| `add [files]`      | Stage installer(s); bare `add` opens downloads + staging folder |
-| `sync [--force]`   | iLok, staged installers, rescan, launchers, menu (idempotent) |
+| `add [files]`      | Stage installer(s); bare `add` opens downloads and watches `~/Downloads` until Ctrl-C |
+| `sync [--force]`   | Silent-install iLok if needed, open License Manager once for sign-in, run staged installers, rescan, launchers, menu |
 | `launch <name>`    | Open a standalone (fuzzy match); `launch ilok` opens iLok |
 | `list [--json]`    | Show installed standalones |
 | `doctor`           | Check prefix, PipeASIO, iLok, realtime, PipeWire |
@@ -67,8 +70,16 @@ input, and your headphone output. That setting persists in the prefix.
   `~/.local/share/neuraldsp/logs/<title>.log`.
 - **Xruns under load:** make sure you're in the `realtime` group (re-login
   after install) and try a larger `PIPEWIRE_QUANTUM`, e.g. `256/48000`.
+- **iLok installer wizard appeared:** close it. `sync` extracts
+  `PACE License Support Win64.msi` and runs `msiexec /qn` — it should
+  never open InstallShield. Re-run `neuraldsp sync` as your user (not sudo).
 - **iLok download fails:** `sync` falls back to manual staging —
   `neuraldsp add <iLokInstaller>` from https://www.ilok.com.
+- **iLok never asked you to sign in:** run `neuraldsp sync` (or
+  `neuraldsp launch ilok`). Sign-in is always in License Manager — this
+  tool never stores or submits iLok passwords. If the one-time prompt
+  already fired, remove `~/.local/share/neuraldsp/.ilok-signin-prompted`
+  and re-run `sync` to open it again.
 - **Window rules:** matched broadly on Neural/Archetype class/title; tighten
   `hypr/neuraldsp.lua` against `hyprctl clients` output for your titles.
 
@@ -85,4 +96,6 @@ input, and your headphone output. That setting persists in the prefix.
 - Neural DSP does not officially support Linux; this is a community Wine
   wrapper, not affiliated with Neural DSP, Focusrite, PACE, or Omarchy.
 - Support matrix: XWayland required (Wine runs with the X11 driver),
-  per-title PipeASIO selection on first run.
+  per-title PipeASIO selection on first run. iLok is a silent prerequisite;
+  `./install.sh` (and later `sync` if needed) opens License Manager for sign-in.
+  Passwords stay on ilok.com.
