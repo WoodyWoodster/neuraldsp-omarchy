@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+#
+# neuraldsp — Neural DSP standalone apps on Omarchy/Arch via Wine + PipeASIO.
+#
+# Source lives in the neuraldsp-omarchy repo (bin/neuraldsp); install.sh
+# deploys this file to ~/.local/bin/neuraldsp.
+#
+# Commands: add, sync, launch, list, doctor
+set -euo pipefail
+
+NEURALDSP_HOME="${NEURALDSP_HOME:-$HOME/.local/share/neuraldsp}"
+NEURALDSP_PREFIX="${NEURALDSP_PREFIX:-$NEURALDSP_HOME/prefix}"
+NEURALDSP_INSTALLERS="${NEURALDSP_INSTALLERS:-$NEURALDSP_HOME/installers}"
+APPS_JSON="$NEURALDSP_HOME/apps.json"
+DESKTOP_DIR="$HOME/.local/share/applications"
+LOG_DIR="$NEURALDSP_HOME/logs"
+MARKER_DIR="$NEURALDSP_HOME/.installed"
+MENU_JSONC="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+MENU_BASE="$NEURALDSP_HOME/menu-base.json"
+
+export WINEARCH=win64
+export WINEPREFIX="$NEURALDSP_PREFIX"
+export WINEDEBUG="${WINEDEBUG:--all}"
+
+# Verified 2026-09-16. Free installer; re-verify if downloads start failing.
+ILOK_URL="https://installers.ilok.com/iloklicensemanager/LicenseSupportInstallerWin64.zip"
+# Verified 2026-09-16. Login-gated downloads; we never handle credentials.
+NDSP_DOWNLOADS_URL="https://www.neuraldsp.com/downloads"
+
+log() { printf 'neuraldsp: %s\n' "$*"; }
+die() { printf 'neuraldsp: error: %s\n' "$*" >&2; exit 1; }
+notify() {
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send -u "$1" "$2" "$3" >/dev/null 2>&1 || true
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+usage: neuraldsp <command> [args]
+
+  add [file ...]   stage installer(s); with no args, open the Neural DSP
+                   downloads page + staging folder so you can log in,
+                   download, and stage in one guided step
+  sync [--force]   install iLok (auto-downloaded prerequisite), run staged
+                   installers, rescan titles, refresh launchers + menu
+  launch <name>    open a standalone (fuzzy match); the Guitar menu /
+                   Super+Space entries are primary, this is the fallback.
+                   `launch ilok` opens iLok License Manager.
+  list [--json]    show installed standalones
+  doctor           check prefix, PipeASIO, iLok, realtime, PipeWire.
+                   Interface presence is info-only and never blocks launch.
+
+env: NEURALDSP_HOME, NEURALDSP_PREFIX, NEURALDSP_INSTALLERS,
+     PIPEWIRE_QUANTUM (default 128/48000 on launch), WINEDEBUG
+EOF
+}
+
+ensure_dirs() {
+  mkdir -p "$NEURALDSP_HOME" "$NEURALDSP_INSTALLERS" "$LOG_DIR" "$MARKER_DIR" "$DESKTOP_DIR"
+}
+
+dxvk_present() { [[ -f "$NEURALDSP_PREFIX/drive_c/windows/system32/dxgi.dll" ]]; }
+pipeasio_present() { [[ -f "$NEURALDSP_PREFIX/drive_c/windows/system32/pipeasio64.dll" ]]; }
+
+ensure_prefix() {
+  ensure_dirs
+  if [[ ! -d "$NEURALDSP_PREFIX/drive_c" ]]; then
+    log "creating isolated Wine prefix at $NEURALDSP_PREFIX ..."
+    wine wineboot --init >>"$LOG_DIR/prefix.log" 2>&1 || die "wineboot failed (see $LOG_DIR/prefix.log)"
+  fi
+  if ! dxvk_present; then
+    log "installing DXVK (required for Neural DSP GUIs) ..."
+    winetricks -q dxvk >>"$LOG_DIR/prefix.log" 2>&1 || die "winetricks dxvk failed (see $LOG_DIR/prefix.log)"
+  fi
+  if ! pipeasio_present; then
+    log "registering PipeASIO ..."
+    command -v pipeasio-register >/dev/null 2>&1 || die "pipeasio-register not found — install the pipeasio package first"
+    pipeasio-register >>"$LOG_DIR/prefix.log" 2>&1 || die "pipeasio-register failed (see $LOG_DIR/prefix.log)"
+  fi
+}
+
+ilok_detect() {
+  local c
+  for c in \
+    "$NEURALDSP_PREFIX/drive_c/Program Files/iLok License Manager/iLok License Manager.exe" \
+    "$NEURALDSP_PREFIX/drive_c/Program Files (x86)/iLok License Manager/iLok License Manager.exe" \
+  ; do
+    if [[ -f "$c" ]]; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+
+ensure_ilok() {
+  if ilok_detect >/dev/null; then
+    log "iLok License Manager present"
+    return 0
+  fi
+  log "iLok License Manager not found — prerequisite, installing first."
+  local zip="$NEURALDSP_INSTALLERS/LicenseSupportInstallerWin64.zip"
+  if [[ ! -f "$zip" ]]; then
+    log "downloading free iLok installer ..."
+    if ! curl -fSL -o "$zip" "$ILOK_URL"; then
+      rm -f "$zip"
+      notify critical "Neural DSP setup" "iLok download failed. Stage it manually: neuraldsp add <iLokInstaller>"
+      die "iLok download failed. Get it from https://www.ilok.com and stage it with: neuraldsp add <file>"
+    fi
+  fi
+  local dir="$NEURALDSP_INSTALLERS/.ilok-extract"
+  rm -rf "$dir"; mkdir -p "$dir"
+  unzip -q -o "$zip" -d "$dir" || die "could not extract $zip (install unzip and retry)"
+  local inst
+  inst="$(find "$dir" -maxdepth 2 -iname 'License Support*.exe' ! -iname '*uninstall*' | head -1)"
+  [[ -n "${inst:-}" ]] || die "License Support installer not found inside $zip"
+  notify low "Neural DSP setup" "iLok installer launching — click through it, then re-run sync if asked."
+  log "launching iLok installer (click through the GUI) ..."
+  wine "$inst" >>"$LOG_DIR/install.log" 2>&1 || true
+  if ilok_detect >/dev/null; then
+    log "iLok installed."
+    notify low "Neural DSP setup" "iLok License Manager installed."
+  else
+    notify normal "Neural DSP setup" "iLok installer finished but the manager was not detected. Open it from the Guitar menu and sign in."
+    log "WARNING: iLok manager not detected after the installer run. Open it from the Guitar menu (or: neuraldsp launch ilok) and sign in."
+  fi
+}
+
+run_staged() {
+  local force="$1" f sha marker
+  if [[ "$force" == 1 ]]; then rm -f "$MARKER_DIR"/*.done 2>/dev/null || true; fi
+  shopt -s nullglob
+  for f in "$NEURALDSP_INSTALLERS"/*.exe "$NEURALDSP_INSTALLERS"/*.msi; do
+    sha="$(sha1sum "$f" | cut -d' ' -f1)"
+    marker="$MARKER_DIR/$sha.done"
+    if [[ -f "$marker" ]]; then continue; fi
+    notify low "Neural DSP setup" "Installing $(basename "$f") — click through it."
+    log "running installer: $(basename "$f") ..."
+    wine "$f" >>"$LOG_DIR/install.log" 2>&1 || log "WARNING: installer exited nonzero (often harmless for GUI installers)"
+    printf '%s\n' "$f" >"$marker"
+  done
+  shopt -u nullglob
+}
+
+rescan_catalog() {
+  python3 - "$NEURALDSP_PREFIX" "$APPS_JSON" <<'EOF'
+import json, os, re, sys
+prefix, out = sys.argv[1], sys.argv[2]
+roots = [os.path.join(prefix, "drive_c/Program Files/Neural DSP"),
+         os.path.join(prefix, "drive_c/Program Files (x86)/Neural DSP")]
+skip = re.compile(r'unins|uninstall', re.I)
+apps = []
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            if not f.lower().endswith(".exe"):
+                continue
+            if skip.search(f):
+                continue
+            display = f[:-4]
+            slug = re.sub(r'[^a-z0-9]+', '-', display.lower()).strip('-')
+            if not slug:
+                continue
+            apps.append({"slug": slug, "name": display,
+                         "exe": os.path.join(dirpath, f)})
+seen, dedup = set(), []
+for a in sorted(apps, key=lambda a: a["name"].lower()):
+    if a["slug"] in seen:
+        continue
+    seen.add(a["slug"])
+    dedup.append(a)
+with open(out, "w") as fh:
+    json.dump({"apps": dedup}, fh, indent=2)
+    fh.write("\n")
+print(f"neuraldsp: catalog: {len(dedup)} standalone(s)")
+EOF
+}
+
+exec_bin() {
+  local dep="$HOME/.local/bin/neuraldsp"
+  if [[ -x "$dep" ]]; then printf '%s' "$dep"; else printf '%s' "$(readlink -f "$0")"; fi
+}
+
+gen_desktops() {
+  python3 - "$APPS_JSON" "$DESKTOP_DIR" "$(exec_bin)" <<'EOF'
+import json, os, sys
+apps_json, ddir, binp = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(ddir, exist_ok=True)
+data = {"apps": []}
+if os.path.exists(apps_json):
+    with open(apps_json) as fh:
+        data = json.load(fh)
+slugs = set()
+for a in data.get("apps", []):
+    slugs.add(a["slug"])
+    path = os.path.join(ddir, f"neuraldsp-{a['slug']}.desktop")
+    with open(path, "w") as fh:
+        fh.write("[Desktop Entry]\nType=Application\n"
+                 f"Name={a['name']}\n"
+                 "Comment=Neural DSP standalone (Wine + PipeASIO)\n"
+                 f"Exec={binp} launch {a['slug']}\n"
+                 "Terminal=false\nCategories=AudioVideo;Audio;\nStartupNotify=true\n")
+    os.chmod(path, 0o755)
+for f in os.listdir(ddir):
+    if f.startswith("neuraldsp-") and f.endswith(".desktop"):
+        if f[len("neuraldsp-"):-len(".desktop")] not in slugs:
+            os.remove(os.path.join(ddir, f))
+            print(f"neuraldsp: removed stale launcher {f}")
+print(f"neuraldsp: launchers: {len(slugs)} desktop entr(ies)")
+EOF
+}
+
+gen_menu() {
+  python3 - "$MENU_JSONC" "$MENU_BASE" "$APPS_JSON" <<'EOF'
+import json, os, re, shutil, sys, time
+menu_path, base_path, apps_json = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def strip_comments(s):
+    out, i, n, instr = [], 0, len(s), None
+    while i < n:
+        c = s[i]
+        if instr:
+            out.append(c)
+            if c == "\\":
+                if i + 1 < n:
+                    out.append(s[i + 1])
+                i += 2
+                continue
+            if c == instr:
+                instr = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            instr = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and s[i + 1] == "/":
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and s[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (s[i] == "*" and s[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+data = {}
+if os.path.exists(menu_path):
+    try:
+        data = json.loads(strip_comments(open(menu_path).read())) or {}
+    except Exception as e:
+        print(f"neuraldsp: WARNING: could not parse {menu_path}: {e}; menu left untouched")
+        sys.exit(0)
+
+base = {"guitar": {"icon": "", "label": "Guitar",
+                   "description": "Neural DSP standalone guitar apps"}}
+if os.path.exists(base_path):
+    with open(base_path) as fh:
+        base = json.load(fh)
+
+apps = []
+if os.path.exists(apps_json):
+    with open(apps_json) as fh:
+        apps = json.load(fh).get("apps", [])
+
+new = {k: v for k, v in data.items()
+       if k != "guitar" and not k.startswith("guitar.")}
+new.update(base)
+for a in apps:
+    new[f"guitar.{a['slug']}"] = {
+        "icon": "", "label": a["name"],
+        "action": f"uwsm-app -- neuraldsp launch {a['slug']}",
+        "description": "Neural DSP standalone"}
+
+if new == data:
+    print("neuraldsp: menu: up to date")
+    sys.exit(0)
+if os.path.exists(menu_path):
+    shutil.copy2(menu_path, f"{menu_path}.bak.{int(time.time())}")
+os.makedirs(os.path.dirname(menu_path), exist_ok=True)
+with open(menu_path, "w") as fh:
+    json.dump(new, fh, indent=2)
+    fh.write("\n")
+print(f"neuraldsp: menu: wrote {len([k for k in new if k == 'guitar' or k.startswith('guitar.')])} guitar row(s)")
+EOF
+}
+
+cmd_add() {
+  ensure_dirs
+  if [[ $# -eq 0 ]]; then
+    xdg-open "$NDSP_DOWNLOADS_URL" >/dev/null 2>&1 &
+    xdg-open "$NEURALDSP_INSTALLERS" >/dev/null 2>&1 &
+    log "opened Neural DSP downloads + staging folder."
+    log "Log in on neuraldsp.com, download your installers, then: neuraldsp add <file>"
+    return 0
+  fi
+  local f dest
+  for f in "$@"; do
+    [[ -f "$f" ]] || die "not a file: $f"
+    dest="$NEURALDSP_INSTALLERS/$(basename "$f")"
+    if [[ -f "$dest" ]]; then
+      log "already staged: $(basename "$f")"
+    else
+      cp "$f" "$dest"
+      log "staged: $(basename "$f")"
+    fi
+  done
+  log "run: neuraldsp sync"
+}
+
+cmd_sync() {
+  local force=0
+  [[ "${1:-}" == "--force" ]] && force=1
+  ensure_prefix
+  ensure_ilok
+  run_staged "$force"
+  rescan_catalog
+  gen_desktops
+  gen_menu
+  local n
+  n="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("apps",[])))' "$APPS_JSON")"
+  if [[ "$n" == 0 ]]; then
+    notify normal "Neural DSP setup" "Sync done, no standalones found yet. Stage installers with: neuraldsp add"
+    log "sync done — no standalones found yet. Stage installers with: neuraldsp add"
+  else
+    notify low "Neural DSP setup" "Sync done — $n standalone(s) ready in the Guitar menu."
+    log "sync done — $n standalone(s). Open them from the Guitar menu or Super+Space."
+  fi
+}
+
+match_app() {
+  python3 - "$APPS_JSON" "$1" <<'EOF'
+import json, sys
+apps_json, q = sys.argv[1], sys.argv[2].lower()
+try:
+    apps = json.load(open(apps_json)).get("apps", [])
+except Exception:
+    apps = []
+hits = [a for a in apps if q in a["slug"] or q in a["name"].lower()]
+if not hits:
+    print("NONE")
+elif len(hits) > 1:
+    print("MULTI")
+    for a in hits:
+        print(f"{a['slug']} — {a['name']}")
+else:
+    a = hits[0]
+    print(f"{a['slug']}\t{a['name']}\t{a['exe']}")
+EOF
+}
+
+run_standalone() {
+  local slug="$1" name="$2" exe="$3"
+  local logf="$LOG_DIR/$slug.log"
+  [[ -f "$exe" ]] || die "$name not found at: $exe (re-run neuraldsp sync)"
+  export PIPEWIRE_QUANTUM="${PIPEWIRE_QUANTUM:-128/48000}"
+  log "opening $name (quantum $PIPEWIRE_QUANTUM; log: $logf)"
+  log "first run? In the app's audio settings pick: PipeASIO, guitar input, headphone output."
+  if wine "$exe" >>"$logf" 2>&1; then
+    return 0
+  else
+    local code=$?
+    notify critical "$name" "Exited ($code). Log: $logf"
+    die "$name exited ($code). See $logf"
+  fi
+}
+
+cmd_launch() {
+  [[ $# -ge 1 ]] || die "usage: neuraldsp launch <name>"
+  if [[ "$1" == "ilok" ]]; then
+    local exe
+    exe="$(ilok_detect)" || die "iLok not installed yet — run: neuraldsp sync"
+    run_standalone "ilok" "iLok License Manager" "$exe"
+    return 0
+  fi
+  local out first
+  out="$(match_app "$1")"
+  first="$(printf '%s' "$out" | head -1)"
+  if [[ "$first" == "NONE" ]]; then
+    cmd_list || true
+    die "no standalone matches '$1'"
+  fi
+  if [[ "$first" == "MULTI" ]]; then
+    printf '%s\n' "$out" | tail -n +2
+    die "multiple matches for '$1' — be more specific"
+  fi
+  run_standalone "$(printf '%s' "$first" | cut -f1)" "$(printf '%s' "$first" | cut -f2)" "$(printf '%s' "$first" | cut -f3)"
+}
+
+cmd_list() {
+  if [[ ! -f "$APPS_JSON" ]]; then
+    log "nothing installed yet — run: neuraldsp sync"
+    return 0
+  fi
+  if [[ "${1:-}" == "--json" ]]; then cat "$APPS_JSON"; return 0; fi
+  python3 - "$APPS_JSON" <<'EOF'
+import json, sys
+apps = json.load(open(sys.argv[1])).get("apps", [])
+if not apps:
+    print("neuraldsp: nothing installed yet — run: neuraldsp sync")
+else:
+    for a in apps:
+        print(f"{a['slug']:<28} {a['name']}")
+EOF
+}
+
+cmd_doctor() {
+  local fail=0
+  say() { printf '[%s] %s\n' "$1" "$2"; [[ "$1" != FAIL ]] || fail=1; }
+  ensure_dirs
+  command -v wine >/dev/null 2>&1 && say PASS "wine $(wine --version 2>/dev/null)" || say FAIL "wine not found"
+  [[ -d "$NEURALDSP_PREFIX/drive_c" ]] && say PASS "prefix: $NEURALDSP_PREFIX" || say FAIL "prefix missing — run: neuraldsp sync"
+  if pipeasio_present; then say PASS "PipeASIO registered in prefix"; else say FAIL "PipeASIO missing — run: neuraldsp sync"; fi
+  dxvk_present && say PASS "DXVK present" || say WARN "DXVK missing — run: neuraldsp sync"
+  ilok_detect >/dev/null && say PASS "iLok License Manager installed" || say WARN "iLok not installed — run: neuraldsp sync"
+  if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx realtime; then say PASS "realtime group active"; else say WARN "not in realtime group (or re-login pending) — audio may xrun under load"; fi
+  if systemctl --user is-active --quiet pipewire 2>/dev/null; then say PASS "PipeWire active"; else say WARN "PipeWire not active"; fi
+  if command -v pactl >/dev/null 2>&1; then
+    say INFO "sinks: $(pactl list sinks short 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"
+  fi
+  say INFO "launch quantum: ${PIPEWIRE_QUANTUM:-128/48000} (override with PIPEWIRE_QUANTUM env)"
+  say INFO "interface presence is info-only — apps always open, with or without hardware plugged in"
+  if [[ -f "$APPS_JSON" ]]; then
+    say INFO "catalog: $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("apps",[])))' "$APPS_JSON") standalone(s)"
+  else
+    say INFO "catalog: empty — run: neuraldsp sync"
+  fi
+  [[ $fail -eq 0 ]] || die "doctor found failures — fix the FAIL lines above"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  add) cmd_add "$@" ;;
+  sync) cmd_sync "$@" ;;
+  launch) cmd_launch "$@" ;;
+  list) cmd_list "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) die "unknown command: $cmd (see: neuraldsp --help)" ;;
+esac

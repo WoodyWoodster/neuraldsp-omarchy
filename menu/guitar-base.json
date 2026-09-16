@@ -1,0 +1,13 @@
+{
+  "guitar": {
+    "icon": "",
+    "label": "Guitar",
+    "description": "Neural DSP standalone guitar apps"
+  },
+  "guitar.ilok": {
+    "icon": "",
+    "label": "iLok License Manager",
+    "action": "uwsm-app -- neuraldsp launch ilok",
+    "description": "Activate Neural DSP licenses"
+  }
+}

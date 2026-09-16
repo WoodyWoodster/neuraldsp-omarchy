@@ -1,0 +1,7 @@
+# Runtime / personal state — never commit these.
+*.log
+apps.json
+installers/
+prefix/
+logs/
+*.bak.*
